@@ -1,0 +1,110 @@
+#!/bin/bash -e
+#title           :kubectl-backup
+#description     :This script will dump all resources from kubernetes cluster as backup files.
+#author          :fangfeng
+#createDate      :20191220
+#lastUpdate      :20200104 
+#version         :1.1
+#dependency      :yq; ([MACOS] brew install yq; [LINUX] snap install yq;)
+#usage		     :chmod u+x kube-backup.sh; ./kube-backup.sh
+#==============================================================================
+
+KUBECTL=${KUBECTL:-"kubectl"}
+CLUSTER_RESOURCES=${CLUSTER_RESOURCES:-"namespace clusterrole clusterrolebinding customresourcedefinitions"}
+NAMESPACED_RESOURCES=${NAMESPACED_RESOURCES:-"ingress services deployment daemonsets configmap statefulset cronjob pvc"}
+BACKUP_DIRECTORY="${BACKUP_DIRECTORY:-"$(pwd)/backup"}"
+
+function usage() {
+    echo "Dump all kubernetes resources for backup."
+    echo ""
+    echo "Usage:"
+    echo "    kubectl backup [ options ]"
+    echo ""
+    echo "Options:"
+    echo "    -d [directory]: save backup resources to directory. Default: $(pwd)/backup"
+    echo "    -h, --help: Display this help"
+    echo "    --kubeconfig [config]: Path to the kubeconfig file to use for CLI requests"
+    exit 0
+}
+
+function parseOptions() {
+    while (( $# ))
+    do
+    case "$1" in
+    -d|--directory)
+        BACKUP_DIRECTORY=$2
+        shift 2
+        ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --kubeconfig)
+        KUBECTL=${KUBECTL}" --kubeconfig="$2
+        shift 2 
+        ;;
+    *) # preserve positional arguments
+      PARAMS="$PARAMS $1"
+      shift
+      ;;
+    esac
+    done
+}
+
+parseOptions $@
+
+NAMESPACES="${NAMESPACES:-$(${KUBECTL} get ns -o jsonpath={.items[*].metadata.name})}"
+
+if [[ -d ${BACKUP_DIRECTORY} ]]; then
+    read -p "Please make sure [${BACKUP_DIRECTORY}] will be overwrite (y/n): " OPCODE
+    if [[ ${OPCODE} == 'y' ]]
+    then
+        rm -rf ${BACKUP_DIRECTORY}
+        echo "[Important] Deleted ${BACKUP_DIRECTORY}"
+    else
+        exit 1
+    fi
+fi
+
+PATHS_TO_REMOVE='
+metadata.annotations."kubectl.kubernetes.io/last-applied-configuration"
+metadata.annotations."control-plane.alpha.kubernetes.io/leader"
+metadata.uid
+metadata.selfLink
+metadata.resourceVersion
+metadata.creationTimestamp
+metadata.generation'
+
+# Start kubernetes state export
+for RESOURCE in ${CLUSTER_RESOURCES}; do
+    [ -d "${BACKUP_DIRECTORY}" ] || mkdir -p ${BACKUP_DIRECTORY}
+    echo "Exporting resource: ${RESOURCE}"
+    ${KUBECTL} get ${RESOURCE} -o yaml > ${BACKUP_DIRECTORY}/${RESOURCE}.yaml
+    for PATH_TO_REMOVE in ${PATHS_TO_REMOVE}
+    do 
+        yq delete -i ${BACKUP_DIRECTORY}/${RESOURCE}.yaml ${PATH_TO_REMOVE}
+    done
+done
+
+for NAMESPACE in ${NAMESPACES}; do
+    [ -d "${BACKUP_DIRECTORY}/${NAMESPACE}" ] || mkdir -p "${BACKUP_DIRECTORY}/${NAMESPACE}"
+    for RESOURCE in ${NAMESPACED_RESOURCES}; do
+        echo "[${NAMESPACE}] Exporting resource: ${RESOURCE}"
+        # see https://kubernetes.io/docs/reference/kubectl/overview/#custom-columns
+        ${KUBECTL} --namespace=${NAMESPACE} get ${RESOURCE} -o custom-columns=NS:.metadata.namespace,KIND:..kind,NAME:.metadata.name --no-headers | while read -r NS KIND NAME
+        do
+            [ -z ${NAME} ] && continue
+
+            # Service account tokens cannot be exported
+            if [[ ${RESOURCE} == 'secret' && $(${KUBECTL} --namespace=${NAMESPACE} get secret ${NAME} -o jsonpath="{.type}") == "kubernetes.io/service-account-token" ]]; then
+                continue
+            fi
+
+            ${KUBECTL} --namespace=${NAMESPACE} get ${RESOURCE} ${NAME} -o yaml > ${BACKUP_DIRECTORY}/${NAMESPACE}/${RESOURCE}-${NAME}.yaml
+            for PATH_TO_REMOVE in ${PATHS_TO_REMOVE}
+            do
+                yq delete -i ${BACKUP_DIRECTORY}/${NAMESPACE}/${RESOURCE}-${NAME}.yaml ${PATH_TO_REMOVE}
+            done
+        done
+    done
+done
