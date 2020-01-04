@@ -1,0 +1,39 @@
+#!/bin/bash -e
+#title           :kube-prune
+#description     :清除所有无效的 service 和 ingress ，避免 nginx-ingress-controller 的反复提示
+#author          :fangfeng
+#date            :20191231
+#version         :1.0
+#usage		     :chmod u+x kubectl-prune; ./kubectl-prune
+#==============================================================================
+
+for NS in $(kubectl get namespaces -o custom-columns='NS:.metadata.name' --no-headers)
+do
+    echo "Try to prune namespace [${NS}]"
+    VALID_ENDPOINTS=$(kubectl -n ${NS} get endpoints --no-headers | grep -v '<none>' | awk '{print $1}')
+    INGRESSES_TODELETE=""
+    for INGRESS in $(kubectl -n ${NS} get ingress -o custom-columns='INGRESS:.metadata.name' --no-headers)
+    do
+        if [[ ${VALID_ENDPOINTS} != *${INGRESS}* ]]
+        then
+            INGRESSES_TODELETE=${INGRESSES_TODELETE}" "${INGRESS}
+        fi
+    done
+    if [[ ${INGRESSES_TODELETE} != "" ]]
+    then
+        kubectl -n ${NS} delete ingress ${INGRESSES_TODELETE}
+    fi
+
+    SERVICES_TODELETE=""
+    for SERVICE in $(kubectl -n ${NS} get service -o custom-columns='SERVICE:.metadata.name' --no-headers)
+    do
+        if [[ ${VALID_ENDPOINTS} != *${SERVICE}* ]]
+        then
+            SERVICES_TODELETE=${SERVICES_TODELETE}" "${SERVICE}
+        fi
+    done
+    if [[ ${SERVICES_TODELETE} != "" ]]
+    then
+        kubectl -n ${NS} delete service ${SERVICES_TODELETE}
+    fi
+done
